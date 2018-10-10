@@ -1,4 +1,4 @@
-from mido import Message, MidiFile, MidiTrack
+from mido import Message, MidiFile, MidiTrack, MetaMessage, bpm2tempo
 from math import floor
 
 class Singable:
@@ -20,7 +20,7 @@ class Note:
             raise TypeError('Incompatiable type')
 
 
-class Key:
+class Key(Singable):
     def __init__(self, start=0, length=0, note=0, channel=0, velocity=0.75):
         self.start = start
         self.length = length
@@ -82,6 +82,26 @@ class _Enumerate(Singable):
                 time += self.interval
             else:
                 time = time_max
+
+
+class _Repeat(Singable):
+    def __init__(self, child, repeat_num, interval=None):
+        self.child = child
+        self.repeat_num = repeat_num
+        self.interval = interval
+
+    def sing(self):
+        time = 0
+        time_max = 0
+        for _ in range(self.repeat_num):
+            for key in ShiftTime(time)(self.child).sing():
+                time_max = max(key.start + key.length, time_max)
+                yield key
+            if self.interval:
+                time += self.interval
+            else:
+                time = time_max
+
 
 
 class _SelectTime(Singable):
@@ -187,6 +207,26 @@ class _Transpose(Singable):
             yield key.replace(note=key.note + self.transpose)
 
 
+class _Bound(Singable):
+    def __init__(self, child, olow, ohigh):
+        self.child = child
+        self.ohigh = ohigh
+        self.olow = olow
+
+    def sing(self):
+        for key in self.child.sing():
+            octave = key.note.tone // 7
+            tdiff = 0
+            ointerval = self.ohigh - self.olow
+            while octave >= self.ohigh:
+                octave -= ointerval
+                tdiff -= 7 * ointerval
+            while octave < self.olow:
+                octave += ointerval
+                tdiff += 7 * ointerval
+            yield key.replace(note=key.note + tdiff)
+
+
 class _Harmonize(Singable):
     def __init__(self, child, transpose):
         self.child = child
@@ -229,6 +269,16 @@ class _AtChannel(Singable):
             yield key.replace(channel=self.channel)
 
 
+class _AtNote(Singable):
+    def __init__(self, child, note):
+        self.child = child
+        self.note = note
+
+    def sing(self):
+        for key in self.child.sing():
+            yield key.replace(note=self.note)
+
+
 class _Arpeggio(Singable):
     # outliers can be 'loop', 'octave', 'clip'
     def __init__(self, chord_and_pattern, outliers='loop'):
@@ -265,6 +315,7 @@ class _Arpeggio(Singable):
 
 Sequence = parameter_graphmaker(_Sequence)
 Enumerate = parameter_graphmaker(_Enumerate)
+Repeat = parameter_graphmaker(_Repeat)
 SelectTime = parameter_graphmaker(_SelectTime)
 SelectInterval = parameter_graphmaker(_SelectInterval)
 SelectIndex = parameter_graphmaker(_SelectIndex)
@@ -273,40 +324,51 @@ Lengthen = parameter_graphmaker(_Lengthen)
 Longify = parameter_graphmaker(_Longify)
 Amplify = parameter_graphmaker(_Amplify)
 Transpose = parameter_graphmaker(_Transpose)
+Bound = parameter_graphmaker(_Bound)
+Bound = parameter_graphmaker(_Bound)
 Harmonize = parameter_graphmaker(_Harmonize)
 Swing = parameter_graphmaker(_Swing)
 AtChannel = parameter_graphmaker(_AtChannel)
+AtNote = parameter_graphmaker(_AtNote)
 Arpeggio = parameter_graphmaker(_Arpeggio)
 
 
-class Scale:
-    def __init__(self, base=(60, 62, 64, 65, 67, 69, 71)):
-        self.base = base
+def BoundOffset(olow, ohigh, toffset):
+    def _BoundOffset(child):
+        return Transpose(-toffset)(
+            Bound(olow, ohigh)(
+                Transpose(toffset)(child)
+            )
+        )
+    return _BoundOffset
 
-    def __getitem__(self, index):
-        octave = floor(index / 7)
-        i = int(index - octave * 7)
-        return self.base[i] + octave * 12
 
-
-ScaleCMajor = Scale()
-ScaleCMinor = Scale([60, 62, 63, 65, 67, 68, 70])
-
-def to_midi(singable, scale, velocity_max=127, tick_per_beat=480, instruments=None):
+def to_midi(
+    singable, scale, velocity_max=127, tick_per_beat=480, instruments=None,
+    initial_bpm=144
+    ):
     mid = MidiFile()
     track = MidiTrack()
     mid.tracks.append(track)
 
     messages = []
     for key in singable.sing():
-        note = scale[key.note.tone] + key.note.semitones
+        channel = key.channel
+
+        if channel == 9:
+            note = key.note.tone
+        else:
+            note = scale[key.note.tone] + key.note.semitones
+
         velocity = int(key.velocity * velocity_max)
         time_start = int(key.start * tick_per_beat)
         time_end = int((key.start + key.length) * tick_per_beat)
-        channel = key.channel
+        
         messages.append(Message('note_on', note=note, velocity=velocity, time=time_start, channel=channel))
         messages.append(Message('note_off', note=note, velocity=velocity, time=time_end, channel=channel))
     
+    track.append(MetaMessage('set_tempo', tempo=bpm2tempo(initial_bpm)))
+
     for channel, program in instruments.items():
         track.append(Message('program_change', channel=channel, program=program))
 
