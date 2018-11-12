@@ -41,7 +41,7 @@ class Key(Singable):
         yield self
 
 
-def MultiKey(start=0, length=0, notes=0, channel=0, velocity=0.75):
+def MultiKey(start=0, length=0, notes=[], channel=0, velocity=0.75):
     return [Key(start=start, length=length, note=note, channel=channel, velocity=velocity) for note in notes]
 
 
@@ -281,15 +281,18 @@ class _AtNote(Singable):
 
 class _Arpeggio(Singable):
     # outliers can be 'loop', 'octave', 'clip'
-    def __init__(self, chord_and_pattern, outliers='loop'):
+    def __init__(self, chord_and_pattern, outliers='loop', sort=True):
         self.chord, self.pattern = chord_and_pattern
         self.outliers = outliers
+        self.sort = sort
 
     def sing(self):
         key_chord = list(self.chord.sing())
         for arp_key in self.pattern.sing():
             time = arp_key.start
             keys_at_time = [key for key in key_chord if key.start <= time and key.start + key.length > time]
+            if self.sort:
+                keys_at_time.sort(key=lambda key: key.note.tone)
             
             if self.outliers == 'loop':
                 ind = arp_key.note.tone
@@ -299,7 +302,8 @@ class _Arpeggio(Singable):
             elif self.outliers == 'octave':
                 ind = arp_key.note.tone
                 octave = floor(ind / len(keys_at_time))
-                target_key = keys_at_time[ind]
+                baseind = int(ind - floor(ind / len(keys_at_time)) * len(keys_at_time))
+                target_key = keys_at_time[baseind]
                 target_key = target_key.replace(note=target_key.note + Note(octave * 7, 0))
 
             elif self.outliers == 'clip':
@@ -324,7 +328,6 @@ Lengthen = parameter_graphmaker(_Lengthen)
 Longify = parameter_graphmaker(_Longify)
 Amplify = parameter_graphmaker(_Amplify)
 Transpose = parameter_graphmaker(_Transpose)
-Bound = parameter_graphmaker(_Bound)
 Bound = parameter_graphmaker(_Bound)
 Harmonize = parameter_graphmaker(_Harmonize)
 Swing = parameter_graphmaker(_Swing)
