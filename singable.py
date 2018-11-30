@@ -103,7 +103,6 @@ class _Repeat(Singable):
                 time = time_max
 
 
-
 class _SelectTime(Singable):
     def __init__(self, child, start, length, func):
         self.child = child
@@ -291,6 +290,9 @@ class _Arpeggio(Singable):
         for arp_key in self.pattern.sing():
             time = arp_key.start
             keys_at_time = [key for key in key_chord if key.start <= time and key.start + key.length > time]
+            if not keys_at_time:
+                pass
+            
             if self.sort:
                 keys_at_time.sort(key=lambda key: key.note.tone)
             
@@ -317,6 +319,62 @@ class _Arpeggio(Singable):
                 channel=arp_key.channel
             )
 
+
+class _Snap(Singable):
+    # outliers can be 'loop', 'octave'
+    def __init__(self, pattern, chord, outliers='octave'):
+        self.chord, self.pattern = chord, pattern
+        self.outliers = outliers
+
+    def sing(self):
+        key_chord = list(self.chord.sing())
+        for arp_key in self.pattern.sing():
+            time = arp_key.start
+            keys_at_time = [key for key in key_chord if key.start <= time and key.start + key.length > time]
+            
+            if self.outliers == 'loop':
+                target_key = min(keys_at_time, key=lambda key: abs((key.note.tone - arp_key.note.tone) % 7))
+            
+            elif self.outliers == 'octave':
+                target_key = min(keys_at_time, key=lambda key: abs((key.note.tone - arp_key.note.tone) % 7))
+                octave_target = floor(target_key.note.tone / 7)
+                octave_arp_key = floor(arp_key.note.tone / 7)
+                target_key = target_key.replace(note=target_key.note + Note((octave_arp_key - octave_target) * 7, 0))
+
+            yield target_key.replace(
+                velocity=(target_key.velocity * arp_key.velocity), 
+                start=arp_key.start,
+                length=arp_key.length,
+                channel=arp_key.channel
+            )
+
+
+class _ForEach(Singable):
+    def __init__(self, child, predicate, singable):
+        self.child = child
+        self.predicate = predicate
+        self.singable = singable
+
+    def sing(self):
+        for key in self.child.sing():
+            if self.predicate(key):
+                for k in self.singable(key).sing():
+                    yield k
+            else:
+                yield key
+
+
+class _Map(Singable):
+    def __init__(self, child, mapfunc):
+        self.child = child
+        self.mapfunc = mapfunc
+
+    def sing(self):
+        for key in self.child.sing():
+            s = self.mapfunc(key)
+            for k in s(key).sing():
+                yield k
+
 Sequence = parameter_graphmaker(_Sequence)
 Enumerate = parameter_graphmaker(_Enumerate)
 Repeat = parameter_graphmaker(_Repeat)
@@ -334,7 +392,9 @@ Swing = parameter_graphmaker(_Swing)
 AtChannel = parameter_graphmaker(_AtChannel)
 AtNote = parameter_graphmaker(_AtNote)
 Arpeggio = parameter_graphmaker(_Arpeggio)
-
+Snap = parameter_graphmaker(_Snap)
+ForEach = parameter_graphmaker(_ForEach)
+Map = parameter_graphmaker(_Map)
 
 def BoundOffset(olow, ohigh, toffset):
     def _BoundOffset(child):
@@ -344,6 +404,23 @@ def BoundOffset(olow, ohigh, toffset):
             )
         )
     return _BoundOffset
+
+
+def Articulate4(ampdecay):
+    def _amp_map(key):
+        index = int(key.start * 4) % 16
+        if index & 1:
+            return 1 - ampdecay
+        elif index & 2:
+            return 1 - ampdecay / 3 * 2
+        elif index & 4:
+            return 1 - ampdecay / 3
+        return 1
+
+    def _Articulate4(child):
+        return Map(lambda key: Amplify(_amp_map(key)))(child)
+    
+    return _Articulate4
 
 
 def to_midi(
@@ -363,9 +440,12 @@ def to_midi(
         else:
             note = scale[key.note.tone] + key.note.semitones
 
-        velocity = int(key.velocity * velocity_max)
+        velocity = min(int(key.velocity * velocity_max), velocity_max)
         time_start = int(key.start * tick_per_beat)
         time_end = int((key.start + key.length) * tick_per_beat)
+
+        if time_start < 0:
+            continue
         
         messages.append(Message('note_on', note=note, velocity=velocity, time=time_start, channel=channel))
         messages.append(Message('note_off', note=note, velocity=velocity, time=time_end, channel=channel))
